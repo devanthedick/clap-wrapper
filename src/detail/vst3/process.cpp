@@ -808,6 +808,80 @@ bool ProcessAdapter::enqueueOutputEvent(const clap_event_header_t *event)
       break;
 
     case CLAP_EVENT_MIDI:
+    {
+      // MIDI 1.0 output: notes become VST3 note events, everything a VST3
+      // event bus can carry otherwise goes out as a LegacyMIDICCOutEvent
+      // (CC, channel and poly pressure, pitch bend, program change).
+      auto mevt = reinterpret_cast<const clap_event_midi *>(event);
+      const uint8_t status = mevt->data[0] & 0xF0;
+      const auto channel = static_cast<Steinberg::int16>(mevt->data[0] & 0x0F);
+      const uint8_t d1 = mevt->data[1] & 0x7F;
+      const uint8_t d2 = mevt->data[2] & 0x7F;
+
+      Steinberg::Vst::Event oe{};
+      oe.busIndex = 0;  // FIXME - multi-out midi still needs work
+      oe.sampleOffset = mevt->header.time;
+      switch (status)
+      {
+        case 0x90:
+        case 0x80:
+          if (status == 0x90 && d2 > 0)
+          {
+            oe.type = Steinberg::Vst::Event::kNoteOnEvent;
+            oe.noteOn.channel = channel;
+            oe.noteOn.pitch = d1;
+            oe.noteOn.velocity = d2 / 127.0f;
+            oe.noteOn.noteId = -1;
+          }
+          else
+          {
+            oe.type = Steinberg::Vst::Event::kNoteOffEvent;
+            oe.noteOff.channel = channel;
+            oe.noteOff.pitch = d1;
+            oe.noteOff.velocity = status == 0x80 ? d2 / 127.0f : 0.0f;
+            oe.noteOff.noteId = -1;
+          }
+          break;
+        case 0xB0:
+          oe.type = Steinberg::Vst::Event::kLegacyMIDICCOutEvent;
+          oe.midiCCOut.controlNumber = d1;
+          oe.midiCCOut.channel = static_cast<Steinberg::int8>(channel);
+          oe.midiCCOut.value = static_cast<Steinberg::int8>(d2);
+          break;
+        case 0xD0:
+          oe.type = Steinberg::Vst::Event::kLegacyMIDICCOutEvent;
+          oe.midiCCOut.controlNumber = Steinberg::Vst::ControllerNumbers::kAfterTouch;
+          oe.midiCCOut.channel = static_cast<Steinberg::int8>(channel);
+          oe.midiCCOut.value = static_cast<Steinberg::int8>(d1);
+          break;
+        case 0xE0:
+          // value is the LSB, value2 the MSB, as in the MIDI message.
+          oe.type = Steinberg::Vst::Event::kLegacyMIDICCOutEvent;
+          oe.midiCCOut.controlNumber = Steinberg::Vst::ControllerNumbers::kPitchBend;
+          oe.midiCCOut.channel = static_cast<Steinberg::int8>(channel);
+          oe.midiCCOut.value = static_cast<Steinberg::int8>(d1);
+          oe.midiCCOut.value2 = static_cast<Steinberg::int8>(d2);
+          break;
+        case 0xA0:
+          oe.type = Steinberg::Vst::Event::kLegacyMIDICCOutEvent;
+          oe.midiCCOut.controlNumber = Steinberg::Vst::ControllerNumbers::kCtrlPolyPressure;
+          oe.midiCCOut.channel = static_cast<Steinberg::int8>(channel);
+          oe.midiCCOut.value = static_cast<Steinberg::int8>(d1);
+          oe.midiCCOut.value2 = static_cast<Steinberg::int8>(d2);
+          break;
+        case 0xC0:
+          oe.type = Steinberg::Vst::Event::kLegacyMIDICCOutEvent;
+          oe.midiCCOut.controlNumber = Steinberg::Vst::ControllerNumbers::kCtrlProgramChange;
+          oe.midiCCOut.channel = static_cast<Steinberg::int8>(channel);
+          oe.midiCCOut.value = static_cast<Steinberg::int8>(d1);
+          break;
+        default:
+          return true;  // system messages have no VST3 form
+      }
+      if (_vstdata && _vstdata->outputEvents) _vstdata->outputEvents->addEvent(oe);
+    }
+      return true;
+      break;
     case CLAP_EVENT_MIDI_SYSEX:
     case CLAP_EVENT_MIDI2:
       return true;
